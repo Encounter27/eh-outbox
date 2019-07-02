@@ -59,3 +59,22 @@ func (holdEvent *HoldOutboxEvent) FindAndModify(ctx context.Context, repo *mongo
 
 	return err
 }
+
+func (holdEvent *HoldOutboxEvent) Reset(ctx context.Context, repo *mongodb.Repo) error {
+	filter := bson.M{}
+	update := bson.M{
+		"$bit": bson.M{
+			"done":   bson.M{"and": int32(0)},
+			"inProg": bson.M{"and": int32(0)},
+		},
+	}
+	change := mgo.Change{Update: update, ReturnNew: false}
+
+	err := repo.Collection(ctx, func(c *mgo.Collection) error {
+		_, err := c.Find(filter).Apply(change, &holdEvent)
+
+		return err
+	})
+
+	return err
+}

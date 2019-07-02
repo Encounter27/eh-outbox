@@ -72,6 +72,6 @@ func (docOffset ProjectorOffset) Write(ctx context.Context, repo *mongodb.Repo, 
 
 		return err
 	}); err != nil {
-		fmt.Println("Failed to update the offset for [kafka_projector]")
+		fmt.Printf("Failed to update the offset for [%s]", projectorID)
 	}
 }
