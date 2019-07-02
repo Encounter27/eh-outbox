@@ -32,7 +32,7 @@ func (k *ProjectorOffset) Set(offset string) {
 	k.Offset = offset
 }
 
-func (k ProjectorOffset) Filter() bson.M {
+func (k ProjectorOffset) Filter(projectorBit int) bson.M {
 	return bson.M{
 		"inProg": false,
 		"done":   false,
@@ -42,7 +42,7 @@ func (k ProjectorOffset) Filter() bson.M {
 	}
 }
 
-func (k ProjectorOffset) Update() bson.M {
+func (k ProjectorOffset) Update(projectorBit int) bson.M {
 	return bson.M{
 		"$set": bson.M{
 			"inProg": false,
@@ -50,18 +50,18 @@ func (k ProjectorOffset) Update() bson.M {
 	}
 }
 
-func (docOffset *ProjectorOffset) Read(ctx context.Context, repo *mongodb.Repo) {
+func (docOffset *ProjectorOffset) Read(ctx context.Context, repo *mongodb.Repo, projectorID string) {
 	if err := repo.Collection(ctx, func(c *mgo.Collection) error {
-		err := c.Find(bson.M{"_id": "kafka_projector"}).One(&docOffset)
+		err := c.Find(bson.M{"_id": projectorID}).One(&docOffset)
 		return err
 	}); err != nil { // Need to handle properly
 		docOffset.Offset = "000000000000000000000000"
 	}
 }
 
-func (docOffset ProjectorOffset) Write(ctx context.Context, repo *mongodb.Repo) {
+func (docOffset ProjectorOffset) Write(ctx context.Context, repo *mongodb.Repo, projectorID string) {
 	if err := repo.Collection(ctx, func(c *mgo.Collection) error {
-		_, err := c.Upsert(bson.M{"_id": "kafka_projector"}, docOffset)
+		_, err := c.Upsert(bson.M{"_id": projectorID}, docOffset)
 
 		return err
 	}); err != nil {

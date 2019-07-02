@@ -28,13 +28,13 @@ type KafkaProjector struct {
 // Each microservice will have only one such instance
 var kafkaProjector *KafkaProjector
 
-func InitiallizeKafkaProjector(projectorId string, offsetRepo *mongodb.Repo,
+func InitiallizeKafkaProjector(offsetRepo *mongodb.Repo,
 	outboxRepo *mongodb.Repo, writer *kafka.Writer, c outbox.Converter) {
 
 	if kafkaProjector == nil {
 		kafkaProjector = new(KafkaProjector)
 
-		kafkaProjector.ID = projectorId
+		kafkaProjector.ID = "kafka_projector"
 		kafkaProjector.OffsetRepo = offsetRepo
 		kafkaProjector.MsgOutBoxRepo = outboxRepo
 		kafkaProjector.Writer = writer
@@ -46,7 +46,7 @@ func InitiallizeKafkaProjector(projectorId string, offsetRepo *mongodb.Repo,
 		}
 	}
 
-	outbox.GetReadProjectorGroup().RegisterProjector(outbox.ProjectorID(projectorId), kafkaProjector)
+	outbox.GetReadProjectorGroup().RegisterProjector(outbox.ProjectorID(kafkaProjector.ID), kafkaProjector)
 }
 
 func GetKafkaProjector() (*KafkaProjector, error) {
@@ -99,9 +99,9 @@ func (p *KafkaProjector) Worker() {
 			switch state {
 			case outbox.Running:
 				for {
-					docOffset.Read(ctx, p.OffsetRepo)
-					filter := docOffset.Filter()
-					update := docOffset.Update()
+					docOffset.Read(ctx, p.OffsetRepo, p.ID)
+					filter := docOffset.Filter(outbox.KafkaProjectorBit)
+					update := docOffset.Update(outbox.KafkaProjectorBit)
 					change := mgo.Change{Update: update, ReturnNew: true}
 
 					var holdEvent outbox.HoldOutboxEvent
@@ -112,11 +112,11 @@ func (p *KafkaProjector) Worker() {
 							if err := p.WriteToReadside(ctx, string("key"), data); err == nil { // Need ckt breaker for kafka down
 								// Update offset if successfully published
 								docOffset.Set(holdEvent.ID.Hex())
-								docOffset.Write(ctx, p.OffsetRepo)
+								docOffset.Write(ctx, p.OffsetRepo, p.ID)
 							}
 						} else if err == outbox.ErrSkipThisEvent {
 							docOffset.Set(holdEvent.ID.Hex())
-							docOffset.Write(ctx, p.OffsetRepo)
+							docOffset.Write(ctx, p.OffsetRepo, p.ID)
 						}
 					} else { // Needs to handle properly
 						// Incase of Notfound errors stop the routine
