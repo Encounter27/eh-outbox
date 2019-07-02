@@ -12,8 +12,8 @@ import (
 )
 
 type EventOutbox struct {
-	InProg    bool         `json:"inProg"         bson:"inProg"`
-	Done      bool         `json:done             bson:"done"`
+	InProg    int32        `json:"inProg"         bson:"inProg"`
+	Done      int32        `json:done             bson:"done"`
 	EventType eh.EventType `json:"event_type"     bson:"event_type"`
 	Data      interface{}  `json:"data"           bson:"data"`
 	Timestamp time.Time    `json:"timestamp"      bson:"timestamp"`
@@ -42,8 +42,8 @@ type Outbox interface {
 
 type HoldOutboxEvent struct {
 	ID        bson.ObjectId `json:"_id"            bson:"_id,omitempty"`
-	InProg    bool          `json:"inProg"         bson:"inProg"`
-	Done      bool          `json:done             bson:"done"`
+	InProg    int32         `json:"inProg"         bson:"inProg"`
+	Done      int32         `json:done             bson:"done"`
 	EventType eh.EventType  `json:"event_type"     bson:"event_type"`
 	Data      interface{}   `json:"data"           bson:"data"`
 	Timestamp time.Time     `json:"timestamp"      bson:"timestamp"`

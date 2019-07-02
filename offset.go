@@ -12,8 +12,9 @@ import (
 type Offset interface {
 	New(id string)
 	Set(offset string)
-	Filter() bson.M
-	Update() bson.M
+	FilterQuery() bson.M
+	UpdateInprog(projectorBit int32) bson.M
+	UpdateDone(projectorBit int32) bson.M
 	Read(ctx context.Context, repo *mongodb.Repo)
 	Write(ctx context.Context, repo *mongodb.Repo)
 }
@@ -32,21 +33,27 @@ func (k *ProjectorOffset) Set(offset string) {
 	k.Offset = offset
 }
 
-func (k ProjectorOffset) Filter(projectorBit int) bson.M {
+func (k ProjectorOffset) FilterQuery(projectorBit int32) bson.M {
 	return bson.M{
-		"inProg": false,
-		"done":   false,
+		"inProg": bson.M{"$bitsAllClear": projectorBit},
+		"done":   bson.M{"$bitsAllClear": projectorBit},
 		"_id": bson.M{
 			"$gt": bson.ObjectIdHex(k.Offset),
 		},
 	}
 }
 
-func (k ProjectorOffset) Update(projectorBit int) bson.M {
+// Specific projector is in progress
+func (k ProjectorOffset) UpdateInprog(projectorBit int32) bson.M {
 	return bson.M{
-		"$set": bson.M{
-			"inProg": false,
-		},
+		"$bit": bson.M{"inProg": bson.M{"or": projectorBit}},
+	}
+}
+
+// Specific projector is done with the projection
+func (k ProjectorOffset) UpdateDone(projectorBit int32) bson.M {
+	return bson.M{
+		"$bit": bson.M{"done": bson.M{"or": projectorBit}},
 	}
 }
 
