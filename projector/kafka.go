@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	outbox "github.com/encounter27/eh-outbox"
+	outbox "github.com/Encounter27/eh-outbox"
 	"github.com/globalsign/mgo"
 	eh "github.com/looplab/eventhorizon"
 	"github.com/looplab/eventhorizon/repo/mongodb"
