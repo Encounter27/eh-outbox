@@ -60,7 +60,8 @@ func (holdEvent *HoldOutboxEvent) FindAndModify(ctx context.Context, repo *mongo
 	return err
 }
 
-func (holdEvent *HoldOutboxEvent) Reset(ctx context.Context, repo *mongodb.Repo) error {
+// This operation should be atomic and should run in isolation in respect to other post call to eventhorizon
+func Reset(ctx context.Context, repoOutbox *mongodb.Repo, repoOffset *mongodb.Repo) error {
 	filter := bson.M{}
 	update := bson.M{
 		"$bit": bson.M{
@@ -68,13 +69,23 @@ func (holdEvent *HoldOutboxEvent) Reset(ctx context.Context, repo *mongodb.Repo)
 			"inProg": bson.M{"and": int32(0)},
 		},
 	}
-	change := mgo.Change{Update: update, ReturnNew: false}
 
-	err := repo.Collection(ctx, func(c *mgo.Collection) error {
-		_, err := c.Find(filter).Apply(change, &holdEvent)
+	var err error
+	err = repoOutbox.Collection(ctx, func(c *mgo.Collection) error {
+		_, err := c.UpdateAll(filter, update)
 
 		return err
 	})
+
+	err = repoOffset.Collection(ctx, func(c *mgo.Collection) error {
+		_, err := c.RemoveAll(filter)
+
+		return err
+	})
+
+	// Set all readside projections to Running state Asynchronously
+	rpg := GetReadProjectorGroup()
+	go rpg.setStateToAllProjectors(Running)
 
 	return err
 }
