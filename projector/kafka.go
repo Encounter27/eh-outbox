@@ -89,9 +89,13 @@ func (p *KafkaProjector) Worker() {
 	defer p.Wg.Done()
 
 	ctx := context.Background()
-
 	var docOffset outbox.ProjectorOffset
 	docOffset.New(p.ID)
+	filter := docOffset.FilterQuery(outbox.KafkaProjectorBit)
+	updateInprog := docOffset.UpdateInprog(outbox.KafkaProjectorBit)
+	updateDone := docOffset.UpdateDone(outbox.KafkaProjectorBit)
+	changeInprog := mgo.Change{Update: updateInprog, ReturnNew: true}
+	changeDone := mgo.Change{Update: updateDone, ReturnNew: true}
 	state := outbox.Paused
 
 	for {
@@ -101,22 +105,22 @@ func (p *KafkaProjector) Worker() {
 			case outbox.Running:
 				for {
 					docOffset.Read(ctx, p.OffsetRepo, p.ID)
-					filter := docOffset.FilterQuery(outbox.KafkaProjectorBit)
-					updateInprog := docOffset.UpdateInprog(outbox.KafkaProjectorBit)
-					updateDone := docOffset.UpdateDone(outbox.KafkaProjectorBit)
-					changeInprog := mgo.Change{Update: updateInprog, ReturnNew: true}
-					changeDone := mgo.Change{Update: updateDone, ReturnNew: true}
 
 					var holdEvent outbox.HoldOutboxEvent
 					if err := holdEvent.FindAndModify(ctx, p.MsgOutBoxRepo, filter, changeInprog); err == nil {
 						ehEvent := eh.NewEvent(holdEvent.EventType, holdEvent.Data, holdEvent.Timestamp)
 
-						if data, err := p.ec.ConvertToExternalEvent(ctx, ehEvent); err == nil { // Ignore
-							if err := p.WriteToReadside(ctx, string("key"), data); err == nil { // Need ckt breaker for kafka down
-								// Update offset if successfully published
-								docOffset.Set(holdEvent.ID.Hex())
-								docOffset.Write(ctx, p.OffsetRepo, p.ID)
-								holdEvent.FindAndModify(ctx, p.MsgOutBoxRepo, bson.M{"_id": holdEvent.ID}, changeDone)
+						if data, err := p.ec.ConvertToExternalEvent(ctx, ehEvent); err == nil {
+
+							for {
+								if err := p.WriteToReadside(ctx, string("key"), data); err == nil {
+									docOffset.Set(holdEvent.ID.Hex())
+									docOffset.Write(ctx, p.OffsetRepo, p.ID)
+									holdEvent.FindAndModify(ctx, p.MsgOutBoxRepo, bson.M{"_id": holdEvent.ID}, changeDone)
+									break
+								}
+
+								// Need ckt breaker for kafka down
 							}
 						} else if err == outbox.ErrSkipThisEvent {
 							docOffset.Set(holdEvent.ID.Hex())
@@ -124,8 +128,6 @@ func (p *KafkaProjector) Worker() {
 							holdEvent.FindAndModify(ctx, p.MsgOutBoxRepo, bson.M{"_id": holdEvent.ID}, changeDone)
 						}
 					} else { // Needs to handle properly
-						// Incase of Notfound errors stop the routine
-						// Also set the projector state to Paused
 						go p.SetState(outbox.Paused)
 						break
 					}
