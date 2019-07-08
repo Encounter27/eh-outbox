@@ -3,66 +3,72 @@ package projector
 import (
 	"context"
 	"encoding/json"
-	"runtime"
-	"sync"
-	"time"
 
 	outbox "github.com/Encounter27/eh-outbox"
-	"github.com/globalsign/mgo"
-	"github.com/globalsign/mgo/bson"
-	eh "github.com/looplab/eventhorizon"
 	"github.com/looplab/eventhorizon/repo/mongodb"
 	kafka "github.com/segmentio/kafka-go"
 )
 
+// KafkaProjector is concrete implementation of IProjector for kafka
 type KafkaProjector struct {
-	ID            string
-	OffsetRepo    *mongodb.Repo
-	MsgOutBoxRepo *mongodb.Repo
-	Writer        *kafka.Writer
-	Wg            sync.WaitGroup
-	State         chan int
-	ec            outbox.Converter
+	name       string
+	id         int32
+	offsetRepo *mongodb.Repo
+	outBoxRepo *mongodb.Repo
+	Writer     *kafka.Writer
+	ec         outbox.IConverter
 }
 
-// Private global singleton variable
-// Each microservice will have only one such instance
-var kafkaProjector *KafkaProjector
+// RegisterKafkaProjector is to register a kafka projector, which will publish outbox events to kafka
+func RegisterKafkaProjector(name string, offsetRepo *mongodb.Repo, outboxRepo *mongodb.Repo, writer *kafka.Writer, c outbox.IConverter) {
+	kafkaProjector := new(KafkaProjector)
 
-func InitiallizeKafkaProjector(offsetRepo *mongodb.Repo,
-	outboxRepo *mongodb.Repo, writer *kafka.Writer, c outbox.Converter) {
+	kafkaProjector.name = name
+	kafkaProjector.AssignProjectorID(offsetRepo)
+	kafkaProjector.offsetRepo = offsetRepo
+	kafkaProjector.outBoxRepo = outboxRepo
+	kafkaProjector.Writer = writer
 
-	if kafkaProjector == nil {
-		kafkaProjector = new(KafkaProjector)
-
-		kafkaProjector.ID = "kafka_projector"
-		kafkaProjector.OffsetRepo = offsetRepo
-		kafkaProjector.MsgOutBoxRepo = outboxRepo
-		kafkaProjector.Writer = writer
-		kafkaProjector.State = make(chan int, 1)
-
-		kafkaProjector.ec = c
-		if c == nil {
-			kafkaProjector.ec = new(outbox.DefaultConverter)
-		}
+	kafkaProjector.ec = c
+	if c == nil {
+		kafkaProjector.ec = new(outbox.DefaultConverter)
 	}
 
-	outbox.GetReadProjectorGroup().RegisterProjector(outbox.ProjectorID(kafkaProjector.ID), kafkaProjector)
+	outbox.GetReadProjectorGroup().RegisterProjector(kafkaProjector)
 }
 
-func GetKafkaProjector() (*KafkaProjector, error) {
-	if kafkaProjector == nil {
-		return nil, outbox.ErrProjectorNotInitialized
-	}
-
-	return kafkaProjector, nil
+// AssignProjectorID is the implemention of IProjector interface
+func (p *KafkaProjector) AssignProjectorID(offsetRepo *mongodb.Repo) {
+	p.id = outbox.AssignProjectorID(p.name, offsetRepo)
 }
 
-func (p *KafkaProjector) SetState(state int) {
-	p.State <- state
+// Name is the implemention of IProjector interface
+func (p *KafkaProjector) Name() string {
+	return p.name
 }
 
-// Need ckt breaker if kafka is not available
+// Bit is the implemention of IProjector interface
+func (p *KafkaProjector) Bit() int32 {
+	return p.id
+}
+
+// OutboxRepo is the implemention of IProjector interface
+func (p *KafkaProjector) OutboxRepo() *mongodb.Repo {
+	return p.outBoxRepo
+}
+
+// OffsetRepo is the implemention of IProjector interface
+func (p *KafkaProjector) OffsetRepo() *mongodb.Repo {
+	return p.offsetRepo
+}
+
+// Converter is the implemention of IProjector interface
+func (p *KafkaProjector) Converter() outbox.IConverter {
+	return p.ec
+}
+
+// WriteToReadside is the implemention of IProjector interface
+// TODO: Need ckt breaker if kafka is not available
 func (p *KafkaProjector) WriteToReadside(ctx context.Context, key string, data interface{}) error {
 	if bytes, err := json.Marshal(data); err == nil {
 		return p.Writer.WriteMessages(ctx,
@@ -73,70 +79,5 @@ func (p *KafkaProjector) WriteToReadside(ctx context.Context, key string, data i
 		)
 	} else {
 		return err
-	}
-}
-
-func (p *KafkaProjector) Start() {
-	go p.Worker()
-
-	go func() {
-		p.State <- outbox.Running
-	}()
-}
-
-func (p *KafkaProjector) Worker() {
-	p.Wg.Add(1)
-	defer p.Wg.Done()
-
-	ctx := context.Background()
-	var docOffset outbox.ProjectorOffset
-	docOffset.New(p.ID)
-	filter := docOffset.FilterQuery(outbox.KafkaProjectorBit)
-	updateInprog := docOffset.UpdateInprog(outbox.KafkaProjectorBit)
-	updateDone := docOffset.UpdateDone(outbox.KafkaProjectorBit)
-	changeInprog := mgo.Change{Update: updateInprog, ReturnNew: true}
-	changeDone := mgo.Change{Update: updateDone, ReturnNew: true}
-	state := outbox.Paused
-
-	for {
-		select {
-		case state = <-p.State:
-			switch state {
-			case outbox.Running:
-				for {
-					docOffset.Read(ctx, p.OffsetRepo, p.ID)
-
-					var holdEvent outbox.HoldOutboxEvent
-					if err := holdEvent.FindAndModify(ctx, p.MsgOutBoxRepo, filter, changeInprog); err == nil {
-						ehEvent := eh.NewEvent(holdEvent.EventType, holdEvent.Data, holdEvent.Timestamp)
-
-						if data, err := p.ec.ConvertToExternalEvent(ctx, ehEvent); err == nil {
-
-							for {
-								if err := p.WriteToReadside(ctx, string("key"), data); err == nil {
-									docOffset.Set(holdEvent.ID.Hex())
-									docOffset.Write(ctx, p.OffsetRepo, p.ID)
-									holdEvent.FindAndModify(ctx, p.MsgOutBoxRepo, bson.M{"_id": holdEvent.ID}, changeDone)
-									break
-								}
-
-								// Need ckt breaker for kafka down
-							}
-						} else if err == outbox.ErrSkipThisEvent {
-							docOffset.Set(holdEvent.ID.Hex())
-							docOffset.Write(ctx, p.OffsetRepo, p.ID)
-							holdEvent.FindAndModify(ctx, p.MsgOutBoxRepo, bson.M{"_id": holdEvent.ID}, changeDone)
-						}
-					} else { // Needs to handle properly
-						go p.SetState(outbox.Paused)
-						break
-					}
-				}
-			case outbox.Paused:
-			}
-		default:
-			runtime.Gosched()
-		}
-		time.Sleep(time.Second)
 	}
 }

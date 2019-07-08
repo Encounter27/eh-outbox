@@ -3,61 +3,65 @@ package outbox
 import (
 	"context"
 	"fmt"
+	"strings"
+	"sync"
 
 	"github.com/globalsign/mgo"
 	"github.com/globalsign/mgo/bson"
 	"github.com/looplab/eventhorizon/repo/mongodb"
 )
 
-type Offset interface {
-	New(id string)
-	Set(offset string)
-	FilterQuery() bson.M
-	UpdateInprog(projectorBit int32) bson.M
-	UpdateDone(projectorBit int32) bson.M
-	Read(ctx context.Context, repo *mongodb.Repo)
-	Write(ctx context.Context, repo *mongodb.Repo)
+type iOffset interface {
+	new(name string, bit string)
+	set(offset string)
+	filterQuery() bson.M
+	updateInprog(projectorBit int32) bson.M
+	updateDone(projectorBit int32) bson.M
+	read(ctx context.Context, repo *mongodb.Repo)
+	write(ctx context.Context, repo *mongodb.Repo)
 }
 
-type ProjectorOffset struct {
-	ID     string `json:"_id"         bson:"_id"`
+type projectorOffset struct {
+	NameID string `json:"_id"         bson:"_id"`
+	Bit    int32  `json:"bit"         bson:"bit"`
 	Offset string `json:"offset"      bson:"offset"`
 }
 
-func (k *ProjectorOffset) New(id string) {
-	k.ID = id
-	k.Offset = "000000000000000000000000"
+func (docOffset *projectorOffset) new(name string, bit int32) {
+	docOffset.NameID = name
+	docOffset.Bit = bit
+	docOffset.Offset = "000000000000000000000000"
 }
 
-func (k *ProjectorOffset) Set(offset string) {
-	k.Offset = offset
+func (docOffset *projectorOffset) set(offset string) {
+	docOffset.Offset = offset
 }
 
-func (k ProjectorOffset) FilterQuery(projectorBit int32) bson.M {
+func (docOffset projectorOffset) filterQuery(projectorBit int32) bson.M {
 	return bson.M{
 		"inProg": bson.M{"$bitsAllClear": projectorBit},
 		"done":   bson.M{"$bitsAllClear": projectorBit},
 		"_id": bson.M{
-			"$gt": bson.ObjectIdHex(k.Offset),
+			"$gt": bson.ObjectIdHex(docOffset.Offset),
 		},
 	}
 }
 
 // Specific projector is in progress
-func (k ProjectorOffset) UpdateInprog(projectorBit int32) bson.M {
+func (docOffset projectorOffset) updateInprog(projectorBit int32) bson.M {
 	return bson.M{
 		"$bit": bson.M{"inProg": bson.M{"or": projectorBit}},
 	}
 }
 
 // Specific projector is done with the projection
-func (k ProjectorOffset) UpdateDone(projectorBit int32) bson.M {
+func (docOffset projectorOffset) updateDone(projectorBit int32) bson.M {
 	return bson.M{
 		"$bit": bson.M{"done": bson.M{"or": projectorBit}},
 	}
 }
 
-func (docOffset *ProjectorOffset) Read(ctx context.Context, repo *mongodb.Repo, projectorID string) {
+func (docOffset *projectorOffset) read(ctx context.Context, repo *mongodb.Repo, projectorID string) {
 	if err := repo.Collection(ctx, func(c *mgo.Collection) error {
 		err := c.Find(bson.M{"_id": projectorID}).One(&docOffset)
 		return err
@@ -66,7 +70,7 @@ func (docOffset *ProjectorOffset) Read(ctx context.Context, repo *mongodb.Repo, 
 	}
 }
 
-func (docOffset ProjectorOffset) Write(ctx context.Context, repo *mongodb.Repo, projectorID string) {
+func (docOffset projectorOffset) write(ctx context.Context, repo *mongodb.Repo, projectorID string) {
 	if err := repo.Collection(ctx, func(c *mgo.Collection) error {
 		_, err := c.Upsert(bson.M{"_id": projectorID}, docOffset)
 
@@ -74,4 +78,31 @@ func (docOffset ProjectorOffset) Write(ctx context.Context, repo *mongodb.Repo, 
 	}); err != nil {
 		fmt.Printf("Failed to update the offset for [%s]", projectorID)
 	}
+}
+
+var assignProjectorBitMu sync.RWMutex
+
+// AssignProjectorID will assign a bit position to the concrete projector at the time of projector registration
+func AssignProjectorID(name string, offsetRepo *mongodb.Repo) int32 {
+	assignProjectorBitMu.Lock()
+	defer assignProjectorBitMu.Unlock()
+
+	var (
+		count int
+		err   error
+		d     projectorOffset
+	)
+
+	err = offsetRepo.Collection(context.Background(), func(c *mgo.Collection) error {
+		err = c.Find(bson.M{"_id": name}).One(&d)
+		count, _ = c.Count()
+
+		return err
+	})
+
+	if err != nil && strings.Contains(err.Error(), mgo.ErrNotFound.Error()) {
+		return int32(1 << uint(count))
+	}
+
+	return d.Bit
 }
