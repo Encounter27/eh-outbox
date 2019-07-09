@@ -11,6 +11,13 @@ import (
 	eh "github.com/looplab/eventhorizon"
 )
 
+// Possible worker states.
+const (
+	Stopped = 0
+	Paused  = 1
+	Running = 2
+)
+
 type iWorker interface {
 	start()
 	run()
